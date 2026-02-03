@@ -4,7 +4,7 @@ from typing import Annotated, Optional
 import typer
 
 from trapdata.api.api import CLASSIFIER_CHOICES
-from trapdata.cli import db, export, queue, settings, shell, show, test
+from trapdata.cli import db, export, queue, settings, shell, show, test, worker
 from trapdata.db.base import get_session_class
 from trapdata.db.models.events import get_or_create_monitoring_sessions
 from trapdata.db.models.queue import add_monitoring_session_to_queue
@@ -20,6 +20,7 @@ cli.add_typer(db.cli, name="db", help="Create, update and manage the database")
 cli.add_typer(
     queue.cli, name="queue", help="Add and manage images in the processing queue"
 )
+cli.add_typer(worker.cli, name="worker", help="Antenna worker for remote processing")
 
 
 @cli.command()
@@ -96,36 +97,6 @@ def run_api(port: int = 2000):
     import uvicorn
 
     uvicorn.run("trapdata.api.api:app", host="0.0.0.0", port=port, reload=True)
-
-
-@cli.command("worker")
-def worker(
-    pipelines: Annotated[
-        list[str] | None,
-        typer.Option(
-            help="List of pipelines to use for processing (e.g., moth_binary, panama_moths_2024, etc.) or all if not specified."
-        ),
-    ] = None,
-):
-    """
-    Run the worker to process images from the REST API queue.
-    """
-    if not pipelines:
-        pipelines = list(CLASSIFIER_CHOICES.keys())
-
-    # Validate that each pipeline is in CLASSIFIER_CHOICES
-    invalid_pipelines = [
-        pipeline for pipeline in pipelines if pipeline not in CLASSIFIER_CHOICES.keys()
-    ]
-
-    if invalid_pipelines:
-        raise typer.BadParameter(
-            f"Invalid pipeline(s): {', '.join(invalid_pipelines)}. Must be one of: {', '.join(CLASSIFIER_CHOICES.keys())}"
-        )
-
-    from trapdata.cli.worker import run_worker
-
-    run_worker(pipelines=pipelines)
 
 
 if __name__ == "__main__":

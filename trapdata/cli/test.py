@@ -24,7 +24,7 @@ def all():
     # return_code = pytest.main(["--doctest-modules", "-v", "."])
     # return_code = pytest.main(["-v", "."])
 
-    return_code = subprocess.call(["pytest", "-v"])
+    return_code = subprocess.call([sys.executable, "-m", "pytest", "-v"])
     sys.exit(return_code)
 
 
@@ -45,9 +45,7 @@ def pipeline():
 
 @cli.command()
 def species_by_track(
-    event_day: Annotated[
-        datetime.datetime, typer.Argument(formats=["%Y-%m-%d"])  # noqa: F722
-    ]
+    event_day: Annotated[datetime.datetime, typer.Argument(formats=["%Y-%m-%d"])]
 ):
     """Get unique species by track for a specific event day."""
     Session = get_session_class(settings.database_url)

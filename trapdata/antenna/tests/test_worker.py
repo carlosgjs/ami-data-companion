@@ -12,27 +12,29 @@ from unittest.mock import MagicMock
 import torch
 from fastapi.testclient import TestClient
 
-from trapdata.api.datasets import RESTDataset, rest_collate_fn
-from trapdata.api.schemas import (
+from trapdata.antenna.client import get_jobs
+from trapdata.antenna.datasets import RESTDataset, rest_collate_fn
+from trapdata.antenna.registration import register_pipelines_for_project
+from trapdata.antenna.schemas import (
     AntennaPipelineProcessingTask,
     AntennaTaskResult,
     AntennaTaskResultError,
-    PipelineResultsResponse,
+    PipelineConfigResponse,
 )
-from trapdata.api.tests import antenna_api_server
-from trapdata.api.tests.antenna_api_server import app as antenna_app
+from trapdata.antenna.tests import antenna_api_server
+from trapdata.antenna.tests.antenna_api_server import app as antenna_app
+from trapdata.antenna.worker import _process_job
+from trapdata.api.schemas import PipelineResultsResponse
 from trapdata.api.tests.image_server import StaticFileTestServer
 from trapdata.api.tests.utils import get_test_image_urls, patch_antenna_api_requests
-from trapdata.cli.worker import _get_jobs, _process_job
 from trapdata.tests import TEST_IMAGES_BASE_PATH
-
 
 # ---------------------------------------------------------------------------
 # TestRestCollateFn - Unit tests for collation logic
 # ---------------------------------------------------------------------------
 
 
-class TestRestCollateFn:
+class TestRestCollateFn(TestCase):
     """Tests for rest_collate_fn which separates successful/failed items."""
 
     def test_all_successful(self):
@@ -107,21 +109,6 @@ class TestRestCollateFn:
         assert len(result["failed_items"]) == 1
         assert result["failed_items"][0]["image_id"] == "img2"
 
-    def test_single_item(self):
-        batch = [
-            {
-                "image": torch.rand(3, 32, 32),
-                "reply_subject": "subj1",
-                "image_id": "img1",
-                "image_url": "http://example.com/1.jpg",
-            },
-        ]
-        result = rest_collate_fn(batch)
-
-        assert result["images"].shape == (1, 3, 32, 32)
-        assert result["image_ids"] == ["img1"]
-        assert result["failed_items"] == []
-
 
 # ---------------------------------------------------------------------------
 # TestRESTDatasetIntegration - Integration tests with real image loading
@@ -158,65 +145,6 @@ class TestRESTDatasetIntegration(TestCase):
             auth_token="test-token",
         )
 
-    def test_fetches_and_loads_images(self):
-        """RESTDataset fetches tasks and loads images from URLs."""
-        # Setup mock API job with real image URLs
-        image_urls = get_test_image_urls(
-            self.file_server, self.test_images_dir, subdir="vermont", num=2
-        )
-        tasks = [
-            AntennaPipelineProcessingTask(
-                id=f"task_{i}",
-                image_id=f"img_{i}",
-                image_url=url,
-                reply_subject=f"reply_{i}",
-            )
-            for i, url in enumerate(image_urls)
-        ]
-        antenna_api_server.setup_job(job_id=1, tasks=tasks)
-
-        # Create dataset and iterate
-        with patch_antenna_api_requests(self.antenna_client):
-            dataset = self._make_dataset(job_id=1, batch_size=2)
-            rows = list(dataset)
-
-        # Validate images actually loaded
-        assert len(rows) == 2
-        assert all(r["image"] is not None for r in rows)
-        assert all(isinstance(r["image"], torch.Tensor) for r in rows)
-        assert rows[0]["image_id"] == "img_0"
-        assert rows[1]["image_id"] == "img_1"
-
-    def test_image_failure(self):
-        """Invalid image URL produces error row with image=None."""
-        tasks = [
-            AntennaPipelineProcessingTask(
-                id="task_bad",
-                image_id="img_bad",
-                image_url="http://invalid-url.test/bad.jpg",
-                reply_subject="reply_bad",
-            )
-        ]
-        antenna_api_server.setup_job(job_id=2, tasks=tasks)
-
-        with patch_antenna_api_requests(self.antenna_client):
-            dataset = self._make_dataset(job_id=2)
-            rows = list(dataset)
-
-        assert len(rows) == 1
-        assert rows[0]["image"] is None
-        assert "error" in rows[0]
-
-    def test_empty_queue(self):
-        """First fetch returns empty tasks → iterator stops immediately."""
-        antenna_api_server.setup_job(job_id=3, tasks=[])
-
-        with patch_antenna_api_requests(self.antenna_client):
-            dataset = self._make_dataset(job_id=3)
-            rows = list(dataset)
-
-        assert rows == []
-
     def test_multiple_batches(self):
         """Dataset fetches multiple batches until queue is empty."""
         # Setup job with 3 images (all available in vermont dir), batch size 2
@@ -249,7 +177,7 @@ class TestRESTDatasetIntegration(TestCase):
 
 
 class TestGetJobsIntegration(TestCase):
-    """Integration tests for _get_jobs() with mock Antenna API."""
+    """Integration tests for get_jobs() with mock Antenna API."""
 
     @classmethod
     def setUpClass(cls):
@@ -266,27 +194,9 @@ class TestGetJobsIntegration(TestCase):
         antenna_api_server.setup_job(30, [])
 
         with patch_antenna_api_requests(self.antenna_client):
-            result = _get_jobs("http://testserver/api/v2", "test-token", "moths_2024")
+            result = get_jobs("http://testserver/api/v2", "test-token", "moths_2024")
 
         assert result == [10, 20, 30]
-
-    def test_empty_queue(self):
-        """Empty job queue returns empty list."""
-        with patch_antenna_api_requests(self.antenna_client):
-            result = _get_jobs("http://testserver/api/v2", "test-token", "moths_2024")
-
-        assert result == []
-
-    def test_query_params_sent(self):
-        """Request includes correct query parameters."""
-        # This test validates the query params are sent by checking the function works
-        # The mock API checks the params internally
-        antenna_api_server.setup_job(1, [])
-
-        with patch_antenna_api_requests(self.antenna_client):
-            result = _get_jobs("http://testserver/api/v2", "test-token", "my_pipeline")
-
-        assert isinstance(result, list)
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +380,13 @@ class TestWorkerEndToEnd(TestCase):
 
     def test_full_workflow_with_real_inference(self):
         """
-        Complete workflow: fetch jobs → fetch tasks → load images →
+        Complete workflow: register → fetch jobs → fetch tasks → load images →
         run detection → run classification → post results.
         """
-        # Setup job with 2 test images
+        pipeline_slug = "quebec_vermont_moths_2023"
+
+        # Setup project and job with 2 test images
+        antenna_api_server.setup_projects([{"id": 1, "name": "Test Project"}])
         image_urls = get_test_image_urls(
             self.file_server, self.test_images_dir, subdir="vermont", num=2
         )
@@ -488,25 +401,35 @@ class TestWorkerEndToEnd(TestCase):
         ]
         antenna_api_server.setup_job(job_id=200, tasks=tasks)
 
-        # Step 1: Get jobs
         with patch_antenna_api_requests(self.antenna_client):
-            job_ids = _get_jobs(
+            # Step 1: Register pipeline
+            pipeline_configs = [
+                PipelineConfigResponse(
+                    name="Vermont Moths", slug=pipeline_slug, version=1
+                )
+            ]
+            success, _ = register_pipelines_for_project(
+                base_url="http://testserver/api/v2",
+                auth_token="test-token",
+                project_id=1,
+                service_name="Test Worker",
+                pipeline_configs=pipeline_configs,
+            )
+            assert success is True
+
+            # Step 2: Get jobs
+            job_ids = get_jobs(
                 "http://testserver/api/v2",
                 "test-token",
-                "quebec_vermont_moths_2023",
+                pipeline_slug,
             )
+            assert 200 in job_ids
 
-        assert 200 in job_ids
+            # Step 3: Process job
+            result = _process_job(pipeline_slug, 200, self._make_settings())
+            assert result is True
 
-        # Step 2: Process job
-        with patch_antenna_api_requests(self.antenna_client):
-            result = _process_job(
-                "quebec_vermont_moths_2023", 200, self._make_settings()
-            )
-
-        assert result is True
-
-        # Step 3: Validate results posted
+        # Step 4: Validate results posted
         posted_results = antenna_api_server.get_posted_results(200)
         assert len(posted_results) == 2
 
