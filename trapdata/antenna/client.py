@@ -4,6 +4,7 @@ import socket
 
 import requests
 
+from trapdata.antenna.fault_injector import fault_injector
 from trapdata.antenna.schemas import (
     AntennaJobsListResponse,
     AntennaTaskResult,
@@ -47,6 +48,10 @@ def get_jobs(
     """
     with get_http_session(auth_token) as session:
         try:
+            # Maybe simulate network error during job fetching
+            if fault_injector.maybe_network_error("fetching jobs"):
+                fault_injector.raise_network_error("fetching jobs")
+
             url = f"{base_url.rstrip('/')}/jobs"
             params = {
                 "pipeline__slug": pipeline_slug,
@@ -95,6 +100,10 @@ def post_batch_results(
 
     with get_http_session(auth_token) as session:
         try:
+            # Maybe simulate network error during result posting
+            if fault_injector.maybe_network_error("posting results"):
+                fault_injector.raise_network_error("posting results")
+
             params = {"processing_service_name": processing_service_name}
             response = session.post(url, json=payload, params=params, timeout=60)
             response.raise_for_status()
