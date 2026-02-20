@@ -72,6 +72,7 @@ import torch.utils.data
 import torchvision
 from PIL import Image
 
+from trapdata.antenna.fault_injector import fault_injector
 from trapdata.antenna.schemas import (
     AntennaPipelineProcessingTask,
     AntennaTasksListResponse,
@@ -177,6 +178,11 @@ class RESTDataset(torch.utils.data.IterableDataset):
 
         self._ensure_sessions()
         assert self._api_session is not None
+
+        # Maybe simulate network error during task fetching
+        if fault_injector.maybe_network_error("fetching tasks"):
+            fault_injector.raise_network_error("fetching tasks")
+
         response = self._api_session.get(url, params=params, timeout=30)
         response.raise_for_status()
 
@@ -199,12 +205,31 @@ class RESTDataset(torch.utils.data.IterableDataset):
             Image as a PyTorch tensor, or None if loading failed
         """
         try:
+            # Check for simulated image errors first
+            if fault_injector.maybe_image_404(image_url):
+                fault_injector.raise_image_error(image_url, "404")
+            if fault_injector.maybe_corrupt_image(image_url):
+                fault_injector.raise_image_error(image_url, "corrupt")
+
             # Use dedicated session without auth for external images
             self._ensure_sessions()
             assert self._image_fetch_session is not None
+
+            # Maybe simulate network error during image download
+            if fault_injector.maybe_network_error("downloading image"):
+                fault_injector.raise_network_error("downloading image")
+
             response = self._image_fetch_session.get(image_url, timeout=30)
             response.raise_for_status()
-            image = Image.open(BytesIO(response.content))
+
+            # Check if we should return corrupt data instead of real image
+            if fault_injector.maybe_corrupt_image(image_url):
+                # Simulate corrupt image by returning invalid data
+                image_data = fault_injector.get_corrupt_image_data()
+            else:
+                image_data = response.content
+
+            image = Image.open(BytesIO(image_data))
 
             # Convert to RGB if necessary
             if image.mode != "RGB":

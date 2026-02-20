@@ -10,6 +10,7 @@ import torchvision
 
 from trapdata.antenna.client import get_full_service_name, get_jobs, post_batch_results
 from trapdata.antenna.datasets import get_rest_dataloader
+from trapdata.antenna.fault_injector import fault_injector
 from trapdata.antenna.result_posting import ResultPoster
 from trapdata.antenna.schemas import AntennaTaskResult, AntennaTaskResultError
 from trapdata.api.api import CLASSIFIER_CHOICES
@@ -87,6 +88,9 @@ def _worker_loop(gpu_id: int, pipelines: list[str]):
     full_service_name = get_full_service_name(settings.antenna_service_name)
     logger.info(f"Running worker as: {full_service_name}")
 
+    # Log fault injection status
+    fault_injector.log_statistics()
+
     while True:
         # TODO CGJS: Support pulling and prioritizing single image tasks, which are used in interactive testing
         # These should probably come from a dedicated endpoint and should preempt batch jobs under the assumption that they
@@ -94,6 +98,10 @@ def _worker_loop(gpu_id: int, pipelines: list[str]):
         any_jobs = False
         for pipeline in pipelines:
             logger.info(f"[GPU {gpu_id}] Checking for jobs for pipeline {pipeline}")
+
+            # Maybe crash worker during job fetching
+            fault_injector.maybe_crash_worker(f"fetching jobs for pipeline {pipeline}")
+
             jobs = get_jobs(
                 base_url=settings.antenna_api_base_url,
                 auth_token=settings.antenna_api_auth_token,
@@ -105,6 +113,11 @@ def _worker_loop(gpu_id: int, pipelines: list[str]):
                     f"[GPU {gpu_id}] Processing job {job_id} with pipeline {pipeline}"
                 )
                 try:
+                    # Maybe crash worker during job processing
+                    fault_injector.maybe_crash_worker(
+                        f"processing job {job_id} with pipeline {pipeline}"
+                    )
+
                     any_work_done = _process_job(
                         pipeline=pipeline,
                         job_id=job_id,
@@ -203,6 +216,12 @@ def _process_job(
                     f"Length mismatch: image_ids ({len(image_ids)}), "
                     f"reply_subjects ({len(reply_subjects)}), image_urls ({len(image_urls)})"
                 )
+
+            # Maybe simulate transient error before processing batch
+            if fault_injector.maybe_transient_error(
+                f"batch processing for job {job_id}"
+            ):
+                raise RuntimeError(f"Simulated transient error during batch processing")
 
             # Track start time for this batch
             batch_start_time = datetime.datetime.now()
