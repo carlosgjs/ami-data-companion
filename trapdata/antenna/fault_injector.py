@@ -47,10 +47,6 @@ class FaultInjector:
             os.getenv("AMI_TEST_FAULT_INJECTION_ENABLED", "false").lower() == "true"
         )
 
-        if not self.enabled:
-            logger.info("Fault injection disabled")
-            return
-
         # Parse error rates from environment
         self.worker_crash_rate = self._parse_rate("AMI_TEST_WORKER_CRASH_RATE", 0.0)
         self.network_error_rate = self._parse_rate("AMI_TEST_NETWORK_ERROR_RATE", 0.0)
@@ -67,6 +63,10 @@ class FaultInjector:
             self.permanent_error_images = {
                 img.strip() for img in permanent_images_str.split(",") if img.strip()
             }
+
+        if not self.enabled:
+            logger.info("Fault injection disabled")
+            return
 
         logger.warning(
             f"🧨 FAULT INJECTION ENABLED 🧨 - "
